@@ -7,27 +7,50 @@ from PIL import Image
 import scipy.io as scio
 from types import SimpleNamespace
 import plotly.graph_objects as go
-from src.utils.pc import depth_image_to_point_cloud, transform_pc
+from src.utils.pc import depth_image_to_point_cloud, transform_pc, get_workspace_mask
 from src.utils.dataset import get_sparse_tensor
 from src.utils.robot_info import GRIPPER_DEPTH_BASE, GRIPPER_NEW_DEPTH
 from src.utils.util import set_seed
 from src.utils.config import load_config
 from src.network.model import get_model
 import MinkowskiEngine as ME
+import matplotlib.pyplot as plt
 
+def visualize_point_cloud(cloud):
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
 
-def load_point_cloud(path, view, gt_str='_gt'):
+    if cloud.shape[0] > 100000:
+        idx = np.random.choice(len(cloud), 100000, replace=False)
+        cloud = cloud[idx]
+
+    ax.scatter(cloud[:, 0], cloud[:, 1], cloud[:, 2], s=0.5, c=cloud[:, 2], cmap='viridis')
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Z')
+    ax.set_title("Point Cloud Visualization")
+    plt.tight_layout()
+    plt.show()
+    
+def load_point_cloud(path, view, gt_str='_gt', seg=False):
     depth = np.array(Image.open(os.path.join(path, 'depth'+gt_str, str(view).zfill(4) + '.png')))
     meta = scio.loadmat(os.path.join(path, 'meta', str(view).zfill(4) + '.mat'))
     instrincs = meta['intrinsic_matrix']
     factor_depth = meta['factor_depth']
     cloud = depth_image_to_point_cloud(depth, instrincs, factor_depth)
-
+    depth_mask = (depth > 0)
     camera_poses = np.load(os.path.join(path, 'camera_poses.npy'))
     align_mat = np.load(os.path.join(path, 'cam0_wrt_table.npy'))
     trans = np.dot(align_mat, camera_poses[int(view)])
-    cloud = cloud.reshape(-1, 3)
-    cloud = transform_pc(cloud, trans)
+    print(depth_mask.shape, cloud.shape)
+    if seg == True:
+        seg = np.array(Image.open(os.path.join(path, 'label'+gt_str, str(view).zfill(4) + '.png')))
+        workspace_mask = get_workspace_mask(cloud, seg, trans)
+        mask = (depth_mask & workspace_mask)
+        cloud = cloud[mask]
+    else:
+        cloud = cloud[depth_mask]
+        cloud = cloud.reshape(-1, 3)
     return cloud
 
 
@@ -95,6 +118,25 @@ def get_best_grasp(grasp):
     best_idx = torch.argmax(grasp[:, 0]).item()
     return grasp[best_idx:best_idx+1]
 
+def transform_grasp_to_world(grasp_tensor, transform_matrix):
+    grasp_np = grasp_tensor.detach().cpu().numpy()
+    
+    # rotation (3x3) and translation (3,)
+    rot = grasp_np[4:13].reshape(3, 3)
+    trans = grasp_np[13:16]
+
+    # Apply world = T_cam_to_world @ [R | t]
+    rot_world = transform_matrix[:3, :3] @ rot
+    trans_world = transform_matrix[:3, :3] @ trans + transform_matrix[:3, 3]
+
+    # Put back into grasp format (logprob, width, base_depth, new_depth, 9-d rot, 3-d trans, -1)
+    new_grasp = np.concatenate([
+        grasp_np[0:4],
+        rot_world.reshape(-1),
+        trans_world,
+        grasp_np[16:]
+    ])
+    return new_grasp
 
 def visualize_grasp_plotly_with_box(cloud, grasp_17, arrow_len=0.05):
     x, y, z = cloud[:, 0], cloud[:, 1], cloud[:, 2]
@@ -149,21 +191,20 @@ def visualize_grasp_plotly_with_box(cloud, grasp_17, arrow_len=0.05):
     fig.update_layout(scene=dict(aspectmode='data'), title='Grasp + Gripper Box',
                       margin=dict(l=0, r=0, t=30, b=0))
     fig.show()
-
-
-# -------------------------
-# Main pipeline
-# -------------------------
+    
 if __name__ == "__main__":
     BASE_DIR = "/home/charliecheng/caiyi/DexGraspNet2"
-    scene_path = "/home/charliecheng/caiyi/DexGraspNet2/data/scenes/scene_0100/realsense"
+    scene_path = os.path.join(BASE_DIR, "data/scenes/scene_0100/realsense")
     view_id = 0
     cloud = load_point_cloud(scene_path, view=view_id)
-
     ckpt_path = os.path.join(BASE_DIR, "experiments/exp_gripper_ours/ckpt/DexGraspNet2.0-ckpts/OURS_gripper/ckpt/ckpt_50000.pth")
     model, config = load_grasp_model(ckpt_path)
-
     cloud_vis, grasp = sample_grasp(model, cloud, config.data.voxel_size)
     best_grasp = get_best_grasp(grasp)
+    trans = np.dot(np.load(os.path.join(scene_path, 'cam0_wrt_table.npy')), 
+               np.load(os.path.join(scene_path, 'camera_poses.npy'))[view_id])
 
-    visualize_grasp_plotly_with_box(cloud_vis, best_grasp[0].detach().cpu().numpy())
+    best_grasp_np = transform_grasp_to_world(best_grasp[0], trans)
+    # transform pc to world coordinates
+    cloud_vis = transform_pc(cloud_vis, trans)
+    visualize_grasp_plotly_with_box(cloud_vis, best_grasp_np)
