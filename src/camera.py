@@ -80,7 +80,7 @@ class RealSenseCamera:
         
         return color_image, depth_image, depth_colormap
 
-    def save_dexgraspnet2_meta(profile, depth_scale, output_dir, frame_id=0,
+    def save_dexgraspnet2_meta(self, profile, depth_scale, output_dir, frame_id=0,
                                 camera_pose=None, cam0_wrt_table=None):
         """
         Save RealSense intrinsics and camera pose in DexGraspNet2-compatible format.
