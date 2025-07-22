@@ -11,6 +11,8 @@ import sys
 import argparse
 from datetime import datetime
 import time
+import os
+import pickle
 
 class RealSenseCamera:
     def __init__(self, width=640, height=480, fps=30):
@@ -77,6 +79,61 @@ class RealSenseCamera:
         )
         
         return color_image, depth_image, depth_colormap
+
+    def save_dexgraspnet2_meta(profile, depth_scale, output_dir, frame_id=0,
+                                camera_pose=None, cam0_wrt_table=None):
+        """
+        Save RealSense intrinsics and camera pose in DexGraspNet2-compatible format.
+
+        Args:
+            profile: rs.pipeline_profile from RealSense pipeline
+            depth_scale: float, depth scale from RealSense
+            output_dir: str, where to save the files
+            frame_id: int, current frame index (used in camera_poses.npy)
+            camera_pose: np.ndarray shape (4, 4), optional camera pose matrix
+            cam0_wrt_table: np.ndarray shape (4, 4), optional camera-to-table transform
+        """
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Extract intrinsics
+        color_stream_profile = profile.get_stream(rs.stream.color)
+        intrinsics = color_stream_profile.as_video_stream_profile().get_intrinsics()
+
+        K = [
+            [intrinsics.fx, 0, intrinsics.ppx],
+            [0, intrinsics.fy, intrinsics.ppy],
+            [0, 0, 1]
+        ]
+
+        meta = {
+            'factor_depth': 1.0 / depth_scale,
+            'intrinsic_matrix': K,
+        }
+
+        # Save meta.pkl
+        with open(os.path.join(output_dir, 'meta.pkl'), 'wb') as f:
+            pickle.dump(meta, f)
+
+        print(f"Saved meta.pkl to {output_dir}")
+
+        # Save camera_poses.npy (if provided)
+        if camera_pose is not None:
+            cam_poses_path = os.path.join(output_dir, 'camera_poses.npy')
+            if os.path.exists(cam_poses_path):
+                all_poses = np.load(cam_poses_path)
+                all_poses = np.concatenate([all_poses, camera_pose[None, ...]], axis=0)
+            else:
+                all_poses = np.zeros((frame_id + 1, 4, 4))
+                all_poses[frame_id] = camera_pose
+            np.save(cam_poses_path, all_poses)
+            print(f"Saved camera_poses.npy with {frame_id + 1} poses")
+
+        # Save cam0_wrt_table.npy (optional)
+        if cam0_wrt_table is not None:
+            np.save(os.path.join(output_dir, 'cam0_wrt_table.npy'), cam0_wrt_table)
+            print(f"Saved cam0_wrt_table.npy")
+
+
     
     def save_frames(self, color_image, depth_image, depth_colormap, output_dir=".", prefix="frame"):
         """Save color, depth data, and colorized depth images"""
@@ -131,6 +188,13 @@ def main():
         sys.exit(1)
     
     print(f"\nCapturing frames to: {args.output}")
+    
+    camera.save_dexgraspnet2_meta(
+    profile=camera.profile,
+    depth_scale=camera.depth_scale,
+    output_dir="realsense",
+    frame_id=0
+    )
     if args.continuous:
         print("Running in continuous mode. Press Ctrl+C to stop.")
     else:
