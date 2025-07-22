@@ -32,19 +32,21 @@ def visualize_point_cloud(cloud):
     plt.tight_layout()
     plt.show()
     
-def load_point_cloud(path, view, gt_str='_gt', seg=False):
-    depth = np.array(Image.open(os.path.join(path, 'depth'+gt_str, str(view).zfill(4) + '.png')))
-    meta = scio.loadmat(os.path.join(path, 'meta', str(view).zfill(4) + '.mat'))
-    instrincs = meta['intrinsic_matrix']
-    factor_depth = meta['factor_depth']
+def load_point_cloud(dep_path=None, instrincs=None, factor_depth=1000.0, trans=None, seg=False, seg_path=None):
+    # depth = np.array(Image.open(os.path.join(path, 'depth'+gt_str, str(view).zfill(4) + '.png')))
+    # meta = scio.loadmat(os.path.join(path, 'meta', str(view).zfill(4) + '.mat'))
+    # instrincs = meta['intrinsic_matrix']
+    # factor_depth = meta['factor_depth']
+    # camera_poses = np.load(os.path.join(path, 'camera_poses.npy'))
+    # align_mat = np.load(os.path.join(path, 'cam0_wrt_table.npy'))
+    # trans = np.dot(align_mat, camera_poses[int(view)])
+    depth = np.array(Image.open(dep_path))
     cloud = depth_image_to_point_cloud(depth, instrincs, factor_depth)
     depth_mask = (depth > 0)
-    camera_poses = np.load(os.path.join(path, 'camera_poses.npy'))
-    align_mat = np.load(os.path.join(path, 'cam0_wrt_table.npy'))
-    trans = np.dot(align_mat, camera_poses[int(view)])
     print(depth_mask.shape, cloud.shape)
     if seg == True:
-        seg = np.array(Image.open(os.path.join(path, 'label'+gt_str, str(view).zfill(4) + '.png')))
+        # seg = np.array(Image.open(os.path.join(path, 'label'+gt_str, str(view).zfill(4) + '.png')))
+        seg = np.array(Image.open(seg_path))
         workspace_mask = get_workspace_mask(cloud, seg, trans)
         mask = (depth_mask & workspace_mask)
         cloud = cloud[mask]
@@ -196,15 +198,29 @@ if __name__ == "__main__":
     BASE_DIR = "/home/charliecheng/caiyi/DexGraspNet2"
     scene_path = os.path.join(BASE_DIR, "data/scenes/scene_0100/realsense")
     view_id = 0
-    cloud = load_point_cloud(scene_path, view=view_id)
+    # define paths
     ckpt_path = os.path.join(BASE_DIR, "experiments/exp_gripper_ours/ckpt/DexGraspNet2.0-ckpts/OURS_gripper/ckpt/ckpt_50000.pth")
+    depth_path = "/home/charliecheng/caiyi/DexGraspNet2/data/scenes/scene_0101/realsense/depth_gt/0000.png"
+    instrincs_path = "/home/charliecheng/caiyi/DexGraspNet2/data/scenes/scene_0101/realsense/meta/0000.mat"
+    factor = 1000.0
+    cam0_wrt_table_path = "/home/charliecheng/caiyi/DexGraspNet2/data/scenes/scene_0101/realsense/cam0_wrt_table.npy"
+    camera_poses_path = "/home/charliecheng/caiyi/DexGraspNet2/data/scenes/scene_0101/realsense/camera_poses.npy"
+    # load model
     model, config = load_grasp_model(ckpt_path)
+    # compute extrinsic transform
+    trans = np.dot(np.load(cam0_wrt_table_path), 
+               np.load(camera_poses_path)[view_id])
+    instrincs = scio.loadmat(instrincs_path)['intrinsic_matrix']
+    # load point cloud
+    cloud = load_point_cloud(dep_path=depth_path,
+                             instrincs=instrincs,
+                             factor_depth=factor, 
+                             trans=trans)
     cloud_vis, grasp = sample_grasp(model, cloud, config.data.voxel_size)
     best_grasp = get_best_grasp(grasp)
-    trans = np.dot(np.load(os.path.join(scene_path, 'cam0_wrt_table.npy')), 
-               np.load(os.path.join(scene_path, 'camera_poses.npy'))[view_id])
 
     best_grasp_np = transform_grasp_to_world(best_grasp[0], trans)
     # transform pc to world coordinates
     cloud_vis = transform_pc(cloud_vis, trans)
-    visualize_grasp_plotly_with_box(cloud_vis, best_grasp_np)
+    # visualize_grasp_plotly_with_box(cloud_vis, best_grasp_np)
+    print("Best grasp:", best_grasp_np)
