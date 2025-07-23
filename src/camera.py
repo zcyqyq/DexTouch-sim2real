@@ -13,15 +13,78 @@ from datetime import datetime
 import time
 import os
 import pickle
+from termcolor import cprint
+import torch
+
+raw_extr_data = {
+    "D455_dexhand": {
+        "rvec": [ 0.02322675, -0.00136824,  0.0387247 ],
+        "tvec": [-0.18066608, -0.18902881,  0.45980965],
+        "aruco_2_world": {
+            "rot_mat": [
+                [0, -1, 0],
+                [1, 0, 0],
+                [0, 0, -1]
+            ],
+            "trans_vec": [0.0, 0.0, -47.0]
+        },
+        "world_2_franka_root":{
+            "rot_mat":[
+                [1, 0, 0],
+                [0, 1, 0],
+                [0, 0, 1]
+            ],
+            "trans_vec": [-52.85, 25.55, 0.0]
+        }
+    }
+}
+
+def raw_data_to_extrinsics(cam_raw_data):
+    rvec = np.array(cam_raw_data["rvec"], dtype=np.float32)
+    tvec = np.array(cam_raw_data["tvec"], dtype=np.float32)
+    rmat, jcob = cv2.Rodrigues(rvec)
+    c2w = np.eye(4, dtype=np.float32)
+    c2w[:3, :3] = rmat
+    c2w[:3, 3] = tvec
+    w2c = np.linalg.inv(c2w)
+    return torch.tensor(w2c, dtype=torch.float32)
+
+
+def compose_extrinsics(T_cam_A: np.ndarray,
+                       R_A2B: np.ndarray,
+                       t_A2B: np.ndarray) -> np.ndarray:
+    if not isinstance(T_cam_A, np.ndarray):
+        T_cam_A = np.array(T_cam_A, dtype=np.float32)
+    if not isinstance(R_A2B, np.ndarray):
+        R_A2B = np.array(R_A2B, dtype=np.float32)
+    if not isinstance(t_A2B, np.ndarray):
+        t_A2B = np.array(t_A2B, dtype=np.float32)
+    assert T_cam_A.shape == (4,4)
+    assert R_A2B.shape == (3,3) and t_A2B.shape == (3,)
+    R_cam_A = T_cam_A[:3, :3]
+    t_cam_A = T_cam_A[:3,  3]
+
+    R_cam_B = R_A2B @ R_cam_A
+    t_cam_B = R_A2B @ t_cam_A + t_A2B
+
+    # 组装成 4x4 同态矩阵
+    T_cam_B = np.eye(4, dtype=T_cam_A.dtype)
+    T_cam_B[:3, :3] = R_cam_B
+    T_cam_B[:3,  3] = t_cam_B
+
+    return T_cam_B
+
 
 class RealSenseCamera:
-    def __init__(self, width=640, height=480, fps=30):
+    def __init__(self, width=640, height=480, fps=30, name="D455_dexhand"):
         self.width = width
         self.height = height
         self.fps = fps
         self.pipeline = rs.pipeline()
         self.config = rs.config()
         self.align = None
+        self.name = name
+        cprint(f"Using camera: {name}, please check if it's the case!", 'red')
         
     def initialize(self):
         """Initialize the RealSense camera with specified settings"""
@@ -46,6 +109,8 @@ class RealSenseCamera:
             self.depth_scale = depth_sensor.get_depth_scale()
             print(f"Depth Scale: {self.depth_scale}")
             
+            self.extrinsics = self.get_extrinsics()
+
             # Allow auto-exposure to stabilize
             print("Allowing auto-exposure to stabilize...")
             for _ in range(30):
@@ -108,6 +173,7 @@ class RealSenseCamera:
         meta = {
             'factor_depth': 1.0 / depth_scale,
             'intrinsic_matrix': K,
+            'extrinsic_matrix': self.extrinsics,
         }
 
         # Save meta.pkl
@@ -115,6 +181,7 @@ class RealSenseCamera:
             pickle.dump(meta, f)
 
         print(f"Saved meta.pkl to {output_dir}")
+
 
         # Save camera_poses.npy (if provided)
         if camera_pose is not None:
@@ -133,8 +200,14 @@ class RealSenseCamera:
             np.save(os.path.join(output_dir, 'cam0_wrt_table.npy'), cam0_wrt_table)
             print(f"Saved cam0_wrt_table.npy")
 
-
+    def get_extrinsics(self):
+        data = raw_extr_data[self.name]
+        extrinsics = raw_data_to_extrinsics(data)
+        aruco_2_world = data["aruco_2_world"]
+        world_frame_extr = compose_extrinsics(extrinsics, aruco_2_world["rot_mat"], aruco_2_world["trans_vec"])
+        return world_frame_extr
     
+
     def save_frames(self, color_image, depth_image, depth_colormap, output_dir=".", prefix="frame"):
         """Save color, depth data, and colorized depth images"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # Include milliseconds
@@ -182,17 +255,20 @@ def main():
     
     # Initialize camera
     camera = RealSenseCamera(args.width, args.height, args.fps)
-    
+    save_dir = "./data/scenes/real_world"
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    save_dir = os.path.join(save_dir, timestamp)
+    os.makedirs(save_dir, exist_ok=True)
     if not camera.initialize():
         print("Failed to initialize camera. Make sure Intel RealSense camera is connected.")
         sys.exit(1)
-    
-    print(f"\nCapturing frames to: {args.output}")
+
+    print(f"\nCapturing frames to: {save_dir}")
     
     camera.save_dexgraspnet2_meta(
     profile=camera.profile,
     depth_scale=camera.depth_scale,
-    output_dir="realsense",
+    output_dir=save_dir,
     frame_id=0
     )
     if args.continuous:
@@ -213,7 +289,7 @@ def main():
             
             # Save frames
             color_file, depth_file, depth_color_file, stats_file = camera.save_frames(
-                color_image, depth_image, depth_colormap, args.output, args.prefix
+                color_image, depth_image, depth_colormap, save_dir, args.prefix
             )
             
             frame_count += 1
