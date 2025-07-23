@@ -1,0 +1,6 @@
+Timestamp: 20250722_232148_229
+Resolution: 640x480
+Depth scale: 0.0010000000474974513
+Min depth: 298mm
+Max depth: 6864mm
+Mean depth (non-zero): 748.57mm
