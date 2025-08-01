@@ -1,8 +1,13 @@
 import os
 import yaml
+from isaacgym import gymapi, gymtorch
 import torch
 import numpy as np
 from pytorch3d.transforms import matrix_to_euler_angles
+import time
+import cv2
+import subprocess
+import tempfile
 
 from src.utils.data_evaluator.data_evaluator import DataEvaluator
 from src.utils.simulator.simulator import get_simulator
@@ -10,6 +15,7 @@ from src.utils.robot_model import RobotModel
 from src.utils.width_mapper import WidthMapper
 from src.utils.collision_checker import CollisionChecker
 import time
+
 
 class SimulationEvaluator(DataEvaluator):
     """
@@ -41,6 +47,26 @@ class SimulationEvaluator(DataEvaluator):
             'configs/collision_checker', config['robot_name'], 'CollisionChecker.yaml')
         collision_checker_config = yaml.safe_load(open(collision_checker_config_path, 'r'))
         self._collision_checker = CollisionChecker(collision_checker_config, device)
+        
+        # Video recording settings
+        self._record_video = config.get('record_video', False)
+        self._video_writer = None
+        self._video_fps = config.get('video_fps', 30)
+        self._video_path = config.get('video_path', 'grasp_evaluation.mp4')
+        
+        # Screenshot settings
+        self._save_screenshots = config.get('save_screenshots', False)
+        self._screenshot_dir = config.get('screenshot_dir', 'screenshots')
+        
+        # Slow motion settings
+        self._slow_motion = config.get('slow_motion', False)
+        self._slow_motion_delay = config.get('slow_motion_delay', 0.1)  # seconds between steps
+        
+        # Viewer settings
+        self._keep_viewer_open = config.get('keep_viewer_open', False)
+        
+        # Headless setting
+        self._headless = config.get('headless', True)
     
     def set_environments(
         self, 
@@ -74,6 +100,7 @@ class SimulationEvaluator(DataEvaluator):
             num_envs=num_envs,
             headless=self._config['headless'],
             device_id=int(str(self._device).split(':')[-1]))
+
         
         # register assets
         t = time.time()
@@ -324,28 +351,93 @@ class SimulationEvaluator(DataEvaluator):
     
     def _execute_waypoints(self):
         """
-        execute waypoints
+        execute waypoints with optional slow motion and video recording
         """
+        
+        # Create screenshot directory if needed
+        if self._save_screenshots:
+            os.makedirs(self._screenshot_dir, exist_ok=True)
+        
+        # Start video recording if enabled
+        self._start_video_recording()
         
         # disable gravity before the first waypoint (pregrasp)
         for object_code in self._object_pose_dict:
             self._simulator.disable_gravity(f'object_{object_code}')
+        
+        # Save initial state screenshot
+        if self._save_screenshots:
+            self._save_screenshot(os.path.join(self._screenshot_dir, '01_initial_state.png'))
+        
         # execute waypoints
         for i in range(1, len(self._waypoint_pose_list)):
             start_qpos_all = self._waypoint_qpos_all_list[i - 1]
             end_qpos_all = self._waypoint_qpos_all_list[i]
             steps = self._config['waypoint_steps'][i - 1]
+            
+            print(f"Executing waypoint {i}/{len(self._waypoint_pose_list)-1} ({steps} steps)")
+            
             for step in range(steps):
                 target_qpos = start_qpos_all + (end_qpos_all - start_qpos_all) * (step + 1) / steps
                 self._simulator.set_actor_actions(
                     actor_name='robot',
                     actor_actions=target_qpos,
                 )
+                
+                # Step simulation
                 self._simulator.step()
+                
+                # Capture frame for video
+                self._capture_frame()
+                
+                # Save screenshot at key moments
+                if self._save_screenshots and step == steps // 2:  # Middle of waypoint
+                    self._save_screenshot(os.path.join(self._screenshot_dir, f'02_waypoint_{i:02d}_mid.png'))
+                
+                # Slow motion delay if enabled
+                if self._slow_motion:
+                    time.sleep(self._slow_motion_delay)
+            
+            # Save screenshot at end of each waypoint
+            if self._save_screenshots:
+                self._save_screenshot(os.path.join(self._screenshot_dir, f'03_waypoint_{i:02d}_end.png'))
+            
             # enable gravity after the fourth waypoint (squeeze)
             if i == 3:
                 for object_code in self._object_pose_dict:
                     self._simulator.enable_gravity(f'object_{object_code}')
+                print("Gravity enabled for objects")
+                
+                # Save screenshot after gravity is enabled
+                if self._save_screenshots:
+                    self._save_screenshot(os.path.join(self._screenshot_dir, '04_gravity_enabled.png'))
+        
+        # Save final state screenshot
+        if self._save_screenshots:
+            self._save_screenshot(os.path.join(self._screenshot_dir, '05_final_state.png'))
+        
+        # Stop video recording
+        self._stop_video_recording()
+        
+        # Keep viewer open if requested
+        if self._keep_viewer_open and not self._headless:
+            print("=" * 50)
+            print("Waypoint execution complete! Viewer will stay open.")
+            print("Press ESC or close window to exit.")
+            print("=" * 50)
+            
+            # Keep viewer running
+            while not self._simulator._gym.query_viewer_has_closed(self._simulator._viewer):
+                # Step the simulation to keep it running
+                self._simulator._gym.simulate(self._simulator._sim)
+                self._simulator._gym.fetch_results(self._simulator._sim, True)
+                
+                # Step the graphics
+                self._simulator._gym.step_graphics(self._simulator._sim)
+                self._simulator._gym.draw_viewer(self._simulator._viewer, self._simulator._sim, True)
+                self._simulator._gym.sync_frame_time(self._simulator._sim)
+            
+            print("Viewer closed by user")
     
     def _get_sim_successes(self):
         """
@@ -406,3 +498,123 @@ class SimulationEvaluator(DataEvaluator):
         successes = pregrasp_valid & sim_successes
         
         return successes
+    
+    def _start_video_recording(self):
+        """Start video recording"""
+        if self._record_video and not self._headless:
+            try:
+                # Create video writer using OpenCV
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                self._video_writer = cv2.VideoWriter(
+                    self._video_path, fourcc, self._video_fps, (1920, 1080)
+                )
+                print(f"Started video recording to {self._video_path}")
+                self._frame_count = 0
+            except Exception as e:
+                print(f"Failed to start video recording: {e}")
+                self._record_video = False
+    
+    def _stop_video_recording(self):
+        """Stop video recording"""
+        if hasattr(self, '_video_writer') and self._video_writer is not None:
+            self._video_writer.release()
+            self._video_writer = None
+            print(f"Video recording stopped. Total frames: {getattr(self, '_frame_count', 0)}")
+    
+    def _capture_frame(self):
+        """Capture current frame from Isaac Gym viewer camera"""
+        if self._record_video and not self._headless and self._video_writer is not None:
+            try:
+                # Render current frame before capture
+                self._simulator._gym.render_all_camera_sensors(self._simulator._sim)
+                self._simulator._gym.start_access_image_tensors(self._simulator._sim)
+
+                # Capture frame from viewer camera
+                frame_tensor = self._simulator._gym.get_camera_image_gpu_tensor(
+                    self._simulator._sim,
+                    self._simulator._env_list[0],
+                    self._simulator._camera_handle,  # <-- use this for fixed camera
+                    gymapi.IMAGE_COLOR
+                )
+
+                frame = gymtorch.wrap_tensor(frame_tensor).cpu().numpy()
+                frame = frame.reshape(1080, 1920, 4)  # RGBA
+                frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+                print(frame_bgr.shape)
+                print(frame_bgr)
+
+                self._video_writer.write(frame_bgr)
+                self._frame_count += 1
+
+                self._simulator._gym.end_access_image_tensors(self._simulator._sim)
+
+            except Exception as e:
+                print(f"Warning: Could not capture frame: {e}")
+
+
+    
+    def _save_screenshot(self, filename):
+        """Save a single screenshot using screen capture"""
+        if not self._headless:
+            try:
+                # Use xwd to capture the screen
+                temp_file = tempfile.NamedTemporaryFile(suffix='.xwd', delete=False)
+                temp_file.close()
+                
+                # Capture screen
+                subprocess.run(['xwd', '-root', '-out', temp_file.name], 
+                             capture_output=True, timeout=5)
+                
+                # Convert XWD to PNG using Python
+                try:
+                    import struct
+                    with open(temp_file.name, 'rb') as f:
+                        # Read XWD header
+                        header = f.read(100)
+                        # Skip to image data
+                        f.seek(100)
+                        # Read image data (simplified - assumes 24-bit RGB)
+                        width, height = 1920, 1080
+                        img_data = f.read(width * height * 4)  # 4 bytes per pixel (RGBA)
+                        
+                        # Convert to numpy array
+                        img_array = np.frombuffer(img_data, dtype=np.uint8)
+                        img_array = img_array.reshape(height, width, 4)
+                        
+                        # Convert RGBA to BGR for OpenCV
+                        img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGBA2BGR)
+                        
+                        # Save as PNG
+                        cv2.imwrite(filename, img_bgr)
+                        print(f"Screenshot saved to {filename}")
+                        
+                except Exception as e:
+                    print(f"Could not convert XWD to PNG: {e}")
+                    # Fallback: Create a simple colored image
+                    img = np.zeros((1080, 1920, 3), dtype=np.uint8)
+                    cv2.putText(img, "Grasp Simulation Screenshot", 
+                               (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                    cv2.putText(img, f"Saved at: {time.strftime('%Y-%m-%d %H:%M:%S')}", 
+                               (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                    cv2.imwrite(filename, img)
+                    print(f"Fallback screenshot saved to {filename}")
+                
+                # Clean up temp file
+                os.unlink(temp_file.name)
+                
+            except Exception as e:
+                print(f"Could not save screenshot using screen capture: {e}")
+                try:
+                    # Fallback: Create a simple colored image
+                    img = np.zeros((1080, 1920, 3), dtype=np.uint8)
+                    
+                    # Add text to show it's a screenshot
+                    cv2.putText(img, "Grasp Simulation Screenshot", 
+                               (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                    cv2.putText(img, f"Saved at: {time.strftime('%Y-%m-%d %H:%M:%S')}", 
+                               (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                    
+                    cv2.imwrite(filename, img)
+                    print(f"Fallback screenshot saved to {filename}")
+                except Exception as e2:
+                    print(f"Could not save fallback screenshot: {e2}")

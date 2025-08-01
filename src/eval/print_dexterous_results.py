@@ -18,7 +18,7 @@ if __name__ == '__main__':
 
         result_path = os.path.join(os.path.dirname(os.path.dirname(args.ckpt_path)), 'results') if args.dataset == 'graspnet' else os.path.join(os.path.dirname(os.path.dirname(args.ckpt_path)), 'results_acronym')
         if args.dataset == 'graspnet':
-            scene_id_list = [f'scene_{str(i).zfill(4)}' for i in range(100,190)] + [f'scene_{str(i).zfill(4)}' for i in range(200,380)] + [f'scene_{str(i).zfill(4)}' for i in range(9000, 9900, 5)]
+            scene_id_list = [f'scene_{str(i).zfill(5)}' for i in range(100,190)] + [f'scene_{str(i).zfill(4)}' for i in range(200,380)] + [f'scene_{str(i).zfill(4)}' for i in range(9000, 9900, 5)]
             dense_list = [f'scene_{str(i).zfill(4)}' for i in range(100, 190)]
             loose_list = [f'scene_{str(i).zfill(4)}' for i in range(200, 380)]
             loose_list = [f for f in loose_list if os.path.exists(os.path.join(os.path.dirname(os.path.dirname(args.ckpt_path)), 'results', f,'sim_success.npy'))]

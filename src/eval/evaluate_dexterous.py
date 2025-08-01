@@ -42,6 +42,22 @@ if __name__ == '__main__':
         default='graspnet', choices=['graspnet', 'acronym', 'combined'])
     parser.add_argument('--strategy', type=str,
         default='ours', choices=['ours', 'top10', 'graspness','logprob','random'])
+    parser.add_argument('--slow_motion', type=int, default=0, 
+        help='Enable slow motion execution (1) or normal speed (0)')
+    parser.add_argument('--slow_motion_delay', type=float, default=0.1,
+        help='Delay between steps in slow motion mode (seconds)')
+    parser.add_argument('--record_video', type=int, default=0,
+        help='Record video of the execution (1) or not (0)')
+    parser.add_argument('--video_path', type=str, default='grasp_evaluation.mp4',
+        help='Path to save the recorded video')
+    parser.add_argument('--video_fps', type=int, default=30,
+        help='FPS for video recording')
+    parser.add_argument('--save_screenshots', type=int, default=0,
+        help='Save screenshots at key moments (1) or not (0)')
+    parser.add_argument('--screenshot_dir', type=str, default='screenshots',
+        help='Directory to save screenshots')
+    parser.add_argument('--keep_viewer_open', type=int, default=0,
+        help='Keep viewer open after execution (1) or close immediately (0)')
     args = parser.parse_args()
     
     set_seed(args.seed)
@@ -109,6 +125,14 @@ if __name__ == '__main__':
         'configs/data_evaluator', args.robot_name, f'{args.evaluator}.yaml')
     evaluator_config = yaml.safe_load(open(evaluator_config_path, 'r'))
     evaluator_config['headless'] = args.headless
+    evaluator_config['slow_motion'] = args.slow_motion
+    evaluator_config['slow_motion_delay'] = args.slow_motion_delay
+    evaluator_config['record_video'] = args.record_video
+    evaluator_config['video_path'] = args.video_path
+    evaluator_config['video_fps'] = args.video_fps
+    evaluator_config['save_screenshots'] = args.save_screenshots
+    evaluator_config['screenshot_dir'] = args.screenshot_dir
+    evaluator_config['keep_viewer_open'] = args.keep_viewer_open
     evaluator_class = get_evaluator(args.evaluator)
     data_evaluator = evaluator_class(evaluator_config, args.device)
     
@@ -146,6 +170,7 @@ if __name__ == '__main__':
                 for joint in grasps_batch }
             successes_batch = data_evaluator.evaluate_data(grasps_batch)
             successes.append(successes_batch[1:])
+            break
         
         # save results
         successes = np.concatenate(successes)
@@ -153,4 +178,6 @@ if __name__ == '__main__':
         print(np.mean(successes))
         os.makedirs(os.path.dirname(save_path),exist_ok=True)
         np.save(save_path, successes)
+
+    print("Evaluation complete!")
 

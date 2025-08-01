@@ -422,36 +422,37 @@ class IsaacGymSimulator(Simulator):
             self._total_dofs, dtype=torch.float32, device=self._device)
     
     def _create_viewer(self):
-        """
-        create viewer
-        """
-        
-        # viewer state
+        # Viewer
         self._enable_viewer_sync = True
-        
-        # configure camera
-        self._viewer = self._gym.create_viewer(
-            self._sim, gymapi.CameraProperties())
+        self._viewer = self._gym.create_viewer(self._sim, gymapi.CameraProperties())
         if self._viewer is None:
             print("*** Failed to create viewer")
             quit()
-        
-        # subscribe to keyboard shortcuts
-        self._gym.subscribe_viewer_keyboard_event(
-            self._viewer, gymapi.KEY_ESCAPE, "QUIT")
-        self._gym.subscribe_viewer_keyboard_event(
-            self._viewer, gymapi.KEY_V, "toggle_viewer_sync")
-        
-        # set camera position
+
+        # Keyboard shortcuts
+        self._gym.subscribe_viewer_keyboard_event(self._viewer, gymapi.KEY_ESCAPE, "QUIT")
+        self._gym.subscribe_viewer_keyboard_event(self._viewer, gymapi.KEY_V, "toggle_viewer_sync")
+
+        # Set viewer camera position
         cam_pos = gymapi.Vec3(*self._config['camera_pos'])
         cam_target = gymapi.Vec3(*self._config['camera_target'])
-        self._gym.viewer_camera_look_at(
-            self._viewer, None, cam_pos, cam_target)
-        
-        # render first frame
+        self._gym.viewer_camera_look_at(self._viewer, None, cam_pos, cam_target)
+
+        # Also create a camera sensor in the FIRST env for recording
+        cam_props = gymapi.CameraProperties()
+        cam_props.width = 1920
+        cam_props.height = 1080
+        cam_props.enable_tensors = True
+        self._camera_handle = self._gym.create_camera_sensor(self._env_list[0], cam_props)
+
+        # Position the sensor camera
+        self._gym.set_camera_location(self._camera_handle, self._env_list[0], cam_pos, cam_target)
+
+        # Render initial frame
         self._gym.fetch_results(self._sim, True)
         self._gym.step_graphics(self._sim)
         self._gym.draw_viewer(self._viewer, self._sim, False)
+
     
     def prepare_sim(self):
         """
